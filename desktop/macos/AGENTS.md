@@ -56,9 +56,9 @@ Provider/mode switches and fail-open paths must call `DesktopDiagnosticsManager.
 
 ## Release Pipeline
 
-Beta candidates are cut **on every macOS-affecting merge to `main`** (`push` trigger on the releasable desktop paths, plus a 15-min `schedule` backstop). Each run tags the newest releasable `desktop/macos/**`/`codemagic.yaml` change since the last tag, binding the immutable tag to the Codemagic config that builds it. A candidate reaches beta only after qualification passes:
+Beta candidates ship on the **hourly release train**: `desktop_auto_release.yml` runs on an hourly `schedule` (plus immediate manual `workflow_dispatch` for deliberate/emergency cuts — there is no `push` trigger). Each run tags the newest releasable `desktop/macos/**`/`codemagic.yaml` change since the last tag, coalescing every merge in the window and binding the immutable tag to the Codemagic config that builds it. A candidate reaches beta only after qualification passes:
 
-1. **GitHub Actions** (`desktop_auto_release.yml`) — on that `push` (plus the 15-min `schedule` backstop and manual `workflow_dispatch`) it auto-increments the version and pushes a `v*-macos` tag. A ~60s quiet window (`AUTO_RELEASE_QUIET_SECONDS`) coalesces near-simultaneous merges; the one-active-release fence (Codemagic build status on the latest tag) admits one candidate at a time. Fails closed unless `Release Eligibility`, `Desktop Swift Build & Tests`, and `Desktop Swift Release Compile` all succeeded for the exact newest releasable SHA — so a candidate cuts once that SHA's CI is green (the push fires too early; the backstop catches it after CI settles). After publication, a read-only 10-minute assertion uses the GitHub `CODEMAGIC_API_TOKEN` secret to require exactly one same-tag `omi-desktop-swift-release` build and retains JSON intake evidence; absence, duplicate intake, wrong workflow/source, and provider API visibility failures are distinct failures and never dispatch a fallback build.
+1. **GitHub Actions** (`desktop_auto_release.yml`) — the planner auto-increments the version and pushes a `v*-macos` tag. Schedule runs pass `--min-tag-interval-seconds 3300`, throttling the train to at most one candidate per hour, measured from the previous candidate's GitHub-release `createdAt` (not the tagged commit's time — candidate tags are lightweight); manual dispatch skips the throttle. A ~60s quiet window (`AUTO_RELEASE_QUIET_SECONDS`) coalesces near-simultaneous merges; the one-active-release fence (Codemagic build status on the latest tag) admits one candidate at a time. Fails closed unless `Release Eligibility`, `Desktop Swift Build & Tests`, and `Desktop Swift Release Compile` all succeeded for the exact newest releasable SHA, waiting up to an hour for in-flight checks; when the newest SHA carries a completed *failure*, the planner falls back to the newest **green** releasable SHA behind it (bounded scan) so a red tip degrades the candidate's freshness instead of stalling the train. After publication, a read-only 10-minute assertion uses the GitHub `CODEMAGIC_API_TOKEN` secret to require exactly one same-tag `omi-desktop-swift-release` build and retains JSON intake evidence; absence, duplicate intake, wrong workflow/source, and provider API visibility failures are distinct failures and never dispatch a fallback build.
 2. **Codemagic** (`codemagic.yaml`, workflow `omi-desktop-swift-release`) — triggered by the tag, runs on Mac mini M4:
    - Builds the universal app and dSYM, UUID-checks and uploads symbols to Sentry, and publishes both
    - Signs with Developer ID, notarizes with Apple
@@ -125,6 +125,13 @@ enforces this via `scripts/check-sources-root-layout.py`.
 
 When carving out additional leaf modules, prefer bottom-up order (models and
 storage before UI) and wire `import` + `public` on the extracted target's API.
+
+### Bundled resources
+
+`.process("Resources")` caches its manifest: after adding a file under
+`Sources/Resources/`, touch `Desktop/Package.swift` or the build silently omits it.
+It may flatten subdirectories — search both roots (`OmiSoundAssetLocator`), never
+`Bundle.module`. Cinematic audio is generated: `scripts/make-onboarding-sounds.py`.
 
 ### Swift Formatting
 
@@ -247,7 +254,7 @@ checked in. Ask the user for anything you are missing rather than guessing an en
 - **Build command**: `xcrun swift build -c debug --package-path Desktop` (the `xcrun` prefix is required to match the SDK version)
 - `run.sh` prepends the native Homebrew prefix (`/opt/homebrew/bin` on Apple Silicon or `/usr/local/bin` on Intel), followed by the other prefix when present, because agent and launchd shells may not inherit Homebrew's PATH. This keeps `pkg-config` and other build tools discoverable without requiring a machine-wide shell profile change.
 - **Full dev run**: `./run.sh` — builds Swift app, starts Python backend, starts Cloudflare tunnel, launches app
-- **Fast default dev run**: after one successful full named-bundle launch, ordinary Swift-only `./run.sh` calls reuse the installed bundle. The fast lane runs incremental SwiftPM, atomically replaces the executable and current desktop API URL, re-signs the app, and relaunches without copying/re-signing static agent/framework assets or resetting LaunchServices/auth. Named local profiles are eligible: their current disposable `.env` is refreshed on each patch and is never cached in the bundle fingerprint. Package metadata, resources, agent/runtime inputs, entitlements, and persistent launch configuration automatically take the full path. Force that path with `./run.sh --full` or `OMI_FORCE_FULL_BUNDLE=1`. `OMI_SCAN_STALE_BUNDLES=1` is an explicit stale-LaunchServices recovery scan; do not enable it in the normal loop.
+- **Fast default dev run**: after one successful full named-bundle launch, ordinary Swift-only `./run.sh` calls reuse the installed bundle. The fast lane runs incremental SwiftPM, atomically replaces the executable and current desktop API URL, re-signs the app, and relaunches without copying/re-signing static agent/framework assets or resetting LaunchServices/auth. Named local profiles are eligible: their current disposable `.env` is refreshed on each patch and is never cached in the bundle fingerprint. Package metadata, resources, agent/runtime inputs, entitlements, persistent launch configuration, and an installed bundle whose agent runtime payload is incomplete (`incomplete_runtime_payload`; `scripts/agent-runtime-payload.sh`) automatically take the full path. Force that path with `./run.sh --full` or `OMI_FORCE_FULL_BUNDLE=1`. `OMI_SCAN_STALE_BUNDLES=1` is an explicit stale-LaunchServices recovery scan; do not enable it in the normal loop.
 - **Focused feedback loop**: `./scripts/dev-feedback.py --once|--watch swift '<XCTest filter>'` or `... python '<pytest path>'` runs exactly the regression you selected and reports each iteration time. It watches only the matching component inputs, keeps watching after a failure, and never replaces the full component suite. Pre-push deliberately adds only `xcrun swift build -c debug`; never promote it to the full pinned-Xcode suite or release compile, because that push-time budget belongs to CI.
 - **Swift suite throughput**: Local suites default to four workers. CI uses two workers only because each gets a copy-on-write SwiftPM scratch directory and an isolated Foundation runtime home (preferences, Application Support, caches, and temporary files). Do not raise it without evidence that both build and runtime state remain isolated. Set `OMI_SWIFT_TEST_SUITE_WORKERS=1` to diagnose concurrency failures.
 - **Local Python backend**: direct `./run.sh` development reuses a healthy backend that this worktree owns when Python source/config have not changed. Sync dependencies with `cd ../../backend && ./scripts/sync-python-deps.sh` before the first local launch.
@@ -255,8 +262,8 @@ checked in. Ask the user for anything you are missing rather than guessing an en
 - **Release builds**: Handled entirely by Codemagic CI (no local release script needed)
 - **DO NOT** use bare `swift build` — it will fail with SDK version mismatch
 - **DO NOT** use `xcodebuild` — there is no `.xcodeproj`
-- **DO NOT** launch the app directly from `build/` — always use `./run.sh`. These scripts install to `/Applications/Omi Dev.app` and launch from there, which is required for macOS "Quit & Reopen" (after granting permissions) to find the correct binary. Launching from `build/` causes stale binaries to run after permission restarts.
-- **DO NOT** manually copy binaries into app bundles and launch them — this bypasses signing, `/Applications/` installation, and LaunchServices registration
+- **DO NOT** launch from `build/` or hand-copy binaries into a bundle — always `./run.sh`. It installs to `/Applications/`, signs, and registers with LaunchServices; `build/` binaries go stale after a permission restart.
+- **Code signing**: local entitlements key on the identity's Team ID, not its name. **Never** use `OMI_ALLOW_ADHOC_SIGN=1` to fix a launch failure — it kills that bundle's Screen Recording grant. [`docs/local-code-signing.md`](docs/local-code-signing.md)
 
 - **DO NOT** kill, delete, or interfere with running "Omi", "omi", or "Omi Beta" app bundles — these are production/release installs the user relies on
 
@@ -312,7 +319,7 @@ Fast path (skips web login and sidebar click-through):
      tmp/desktop-auth.json "/Applications/omi-<feature>.app"   # clears stale Keychain; UD→KC migrate
    ./scripts/omi-settings-seed.sh com.omi.omi-<feature>        # replay shortcuts/settings
    ```
-2. **Prefer the local bridge — it never touches the cursor.** It calls the app's real code in-process (no synthetic mouse events). Use it before reaching for `agent-swift click`/`cliclick`/computer-use. Auto-enables on non-prod bundles; run several at once via distinct `OMI_AUTOMATION_PORT` (default 47777).
+2. **Prefer the local bridge — it never touches the cursor.** It calls the app's real code in-process (no synthetic mouse events). Use it before reaching for `agent-swift click`/`cliclick`/computer-use. Auto-enables on non-prod bundles; run several at once via distinct `OMI_AUTOMATION_PORT` (default 47777). Navigation stays backgrounded unless `--show` is passed.
    - `./scripts/omi-ctl state` — app-state snapshot (selected tab, auth, onboarding).
    - `./scripts/omi-ctl navigate <screen> [settings-section]` — jump straight to a screen in ~150ms (`omi-ctl screens` lists targets).
    - `./scripts/omi-ctl actions` then `./scripts/omi-ctl action <name> [k=v …]` — semantic actions (e.g. `refresh_all_data`). Add new ones in `DesktopAutomationActionRegistry`. See `e2e/SKILL.md` §2b.

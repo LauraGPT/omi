@@ -6,6 +6,7 @@ For first-user dogfood, start with the **bucketed** inventory. The `stage-all-fo
 
 **Library:** `utils.memory.legacy_backfill.backfill_user_bucketed`
 **CLI:** `backend/scripts/backfill_legacy_memories.py`
+**Rollout controls:** [`canonical-memory-rollout-flags.md`](canonical-memory-rollout-flags.md)
 
 ## Safety contract
 
@@ -29,13 +30,26 @@ The bulk worker stores its server-owned checkpoint at
 `not_started`, `inventory_done`, `enrolled`, `processing`, `staged`, and
 `read_ready`; a governor or operator pause uses `paused`, while isolated failures
 use `failed`. Re-entry is idempotent. A capped run resumes from the existing
-single-user apply checkpoint, and a failed run restarts deterministic staging so
-successful rows are skipped and failed rows can be retried.
+single-user apply checkpoint. If the active legacy source changes while that
+checkpoint is in progress, staging reconciles deterministic canonical
+destinations and spends the next bounded page only on still-missing rows, so a
+new ID before an old positional cursor cannot cause loss or starvation. Failed
+rows can be retried without modifying legacy data.
 
 `read_ready` means enrollment and staging reconciled for that UID. It does not
 change `MEMORY_MODE`, add the UID to `CANONICAL_MEMORY_USERS`, grant default
 memory reads, or open the global read gate. Those remain explicit later rollout
 actions.
+
+For a code-whitelisted user on an enabled maintenance deployment, the scheduler
+owns the same bounded progression: it creates only the known inert onboarding
+state, advances only that exact state to write, and invokes this checkpointed
+page. At terminal staging it reconciles only a scheduler-owned write control to
+the trusted state-head generation. Graph enrichment is separately permitted for
+already-active canonical Long-term items by its per-item proof fences, so it
+does not wait for unrelated source rows to finish staging.
+Existing write/read controls are preserved; malformed or manually altered
+controls fail closed. The scheduler does not perform the later read cutover.
 
 ### 1. Prepare an explicit UID file
 
@@ -149,13 +163,21 @@ resume; legacy memories remain untouched and must not be deleted or rewritten.
 
 1. **Target uid chosen** — use this section for one-off dogfood; use the governed bulk command above for cohorts.
 2. **Backend env** — `GOOGLE_APPLICATION_CREDENTIALS` (or emulator) points at the intended project.
-3. **Cohort whitelist** — add uid to `CANONICAL_MEMORY_USERS` in `backend/utils/memory/memory_system.py` **before** backfill, then deploy:
+3. **Product entitlement** — confirm the uid is in `CANONICAL_MEMORY_USERS` in
+   `backend/config/canonical_memory_cohort.py` before a normal apply:
    ```python
    CANONICAL_MEMORY_USERS: frozenset[str] = frozenset({
        "your-firebase-uid",
    })
    ```
-4. **Control state** — `users/{uid}/memory_control/state` is created automatically on first real run (dry-run does not create it).
+   For a new enrollment, do not deploy this product-path selector merely to get
+   a dry-run. Use the CLI's explicit one-user admin-override ceremony for
+   staging, then coordinate entitlement deployment with persisted readiness and
+   maintenance as described in the rollout-controls runbook.
+4. **Runtime cohort** — add the same uid to `MEMORY_ENABLED_USERS` only in the
+   intended environment. This readiness fence does not replace the code-owned
+   product entitlement.
+5. **Control state** — `users/{uid}/memory_control/state` is created automatically on first real run (dry-run does not create it).
 
 ## Procedure
 
@@ -256,7 +278,8 @@ assert report.errors == []
 
 ## Rollback (kill-switch)
 
-1. Remove uid from `CANONICAL_MEMORY_USERS` in `memory_system.py` and redeploy.
+1. Remove the uid from `CANONICAL_MEMORY_USERS` in
+   `backend/config/canonical_memory_cohort.py` and redeploy.
 2. User immediately reads legacy `memories` again.
 3. Canonical `memory_items` written during backfill are **not** deleted and **not** copied back to legacy — accepted staleness per rollout policy.
 4. Re-whitelisting resumes canonical reads; backfill re-run is idempotent.

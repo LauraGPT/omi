@@ -179,9 +179,6 @@ class _TestEnvFields implements EnvFields {
   String? get intercomIOSApiKey => null;
 
   @override
-  String? get openAIAPIKey => null;
-
-  @override
   String? get posthogApiKey => null;
 
   @override

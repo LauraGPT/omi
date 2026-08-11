@@ -13,6 +13,7 @@ export type OmiToolCondition =
   | "onboardingOnly"
   | "nonOnboarding"
   | "coordinatorOnly"
+  | "typedChatCoordinatorOnly"
   | "screenContext"
   | "screenContextOrOnboarding";
 export type OmiToolExecutorKind = "swiftTool" | "runtimeControl" | "nodeTool" | "localApiOnly";
@@ -346,7 +347,7 @@ const swiftToolSurfacePatches: Record<string, OmiToolSurfacePatch> = {
       "Save Knowledge Graph",
       "Save a knowledge graph of entities and relationships extracted from the user's data.",
       [
-        "Parameters: nodes (array of {id, label, node_type, aliases}), edges (array of {source_id, target_id, label}).",
+        "Prefer discovery_text (raw notes/findings). Backend extract via knowledge_graph SSOT builds nodes/edges; nodes/edges remain accepted for compatibility.",
         "node_type must be one of: person, organization, place, thing, concept.",
         "Use when exploring the user's files during onboarding to build their knowledge graph.",
         "Deduplication is handled automatically; provide all entities you find.",
@@ -372,12 +373,15 @@ const swiftToolSurfacePatches: Record<string, OmiToolSurfacePatch> = {
     surfaces: ["desktop_chat", "realtime_voice"],
     capabilityDoc: doc(
       "Search Conversations",
-      "Semantic search across the user's past conversations.",
-      ["Use for specific topics, decisions, or events discussed in conversations."],
+      "Search the user's past conversations by topic or exact canonical ID/share link.",
+      [
+        "Use for specific topics, decisions, or events discussed in conversations.",
+        "For a canonical conversation UUID or https://h.omi.me/conversations/<uuid> link, pass it unchanged for an exact lookup.",
+      ],
     ),
     voice: {
       realtimeDescription:
-        "Search the user's past conversations for what they discussed ('what did I say about X', 'what did we decide', 'summarize my last meeting'). Returns titles + summaries only (no full transcripts). Fast synchronous read. Speak the result.",
+        "Search the user's past conversations for what they discussed ('what did I say about X', 'what did we decide', 'summarize my last meeting'), or pass a canonical conversation UUID/share link for an exact lookup. Returns titles + summaries only (no full transcripts). Fast synchronous read. Speak the result.",
     },
   },
   get_memories: {
@@ -403,6 +407,18 @@ const swiftToolSurfacePatches: Record<string, OmiToolSurfacePatch> = {
       realtimeDescription:
         "Search the user's memories / facts for a SPECIFIC thing ('what's my dog's name', 'where do I work', 'what's my partner's name'). Fast synchronous read. Speak the result.",
     },
+  },
+  create_memory: {
+    surfaces: ["desktop_chat"],
+    capabilityDoc: doc(
+      "Create Memory",
+      "Save one user-provided fact or preference to short-term memory.",
+      [
+        "Use only when the user explicitly and affirmatively asks you to remember or save the supplied content.",
+        "Do not infer memories from conversation context, and do not call for a negative request such as 'do not remember this'.",
+        "This writes short-term memory through the authorized desktop backend path; it does not promote, edit, or delete long-term memory.",
+      ],
+    ),
   },
   get_action_items: {
     surfaces: ["desktop_chat", "realtime_voice"],
@@ -876,11 +892,14 @@ const swiftToolManifestDrafts: OmiToolManifestEntryDraft[] = [
     promptSnippet: "save_knowledge_graph - Save entities and relationships to the user's knowledge graph",
     promptGuidelines: [
       "Use when exploring the user's files during onboarding or knowledge-graph building.",
-      "Deduplication is handled automatically; include all meaningful entities and relationships you found.",
     ],
-    latency: "fast local",
+    latency: "fast network",
     inputSchema: schema(
       {
+        discovery_text: {
+          type: "string",
+          description: "Raw discovery notes. Backend knowledge_graph SSOT extracts nodes/edges.",
+        },
         nodes: {
           type: "array",
           items: {
@@ -909,10 +928,12 @@ const swiftToolManifestDrafts: OmiToolManifestEntryDraft[] = [
           },
         },
       },
-      ["nodes", "edges"],
+      [],
     ),
     annotations: localWrite,
-    timeoutClass: "normal",
+    // discovery_text makes this a network edge with a 60s backend request; the normal
+    // 30s relay deadline would report failure while that request is still in flight.
+    timeoutClass: "long",
     executor: { kind: "swiftTool" },
     intendedForAgents: true,
     runtimePreconditions: ["Used by onboarding/knowledge graph flows."],
@@ -941,12 +962,12 @@ const swiftToolManifestDrafts: OmiToolManifestEntryDraft[] = [
   {
     name: "search_conversations",
     label: "Search Conversations",
-    description: "Semantic search across conversations. Use for specific events or topics.",
-    promptSnippet: "search_conversations - Find conversations about a topic",
+    description: "Search conversations by topic or exact canonical ID/share link.",
+    promptSnippet: "search_conversations - Find conversations about a topic or exact ID/share link",
     latency: "fast network",
     inputSchema: schema(
       {
-        query: { type: "string", description: "Event or topic to search for" },
+        query: { type: "string", description: "Event/topic, canonical UUID, or https://h.omi.me/conversations/<uuid> link" },
         start_date: { type: "string" },
         end_date: { type: "string" },
         limit: { type: "number", description: "Default 5, max 20" },
@@ -999,6 +1020,36 @@ const swiftToolManifestDrafts: OmiToolManifestEntryDraft[] = [
     intendedForAgents: true,
     runtimePreconditions: ["Requires authenticated backend access."],
     adapters: piAndStdio(),
+  },
+  {
+    name: "create_memory",
+    label: "Create Memory",
+    description:
+      "Save exactly one user-provided fact or preference to short-term memory. Call only after an explicit affirmative user command such as 'remember this' or 'save this'. Never infer a memory, and never call for a negative request such as 'do not remember this'.",
+    promptSnippet: "create_memory - Save one explicitly requested fact or preference to short-term memory",
+    promptGuidelines: [
+      "The current user message must explicitly and affirmatively ask Omi to remember or save the supplied content.",
+      "Pass only the content to remember; do not add inferred facts, categories, tags, or metadata.",
+      "Do not call when the user merely states a fact, asks a question, asks for a suggestion, or says not to remember/save something.",
+      "This is a one-way non-idempotent write. Do not retry automatically after an unknown outcome; tell the user the save status is uncertain.",
+      "The backend stores this as a short-term memory candidate. Do not claim it was promoted to long-term memory.",
+    ],
+    latency: "fast network",
+    inputSchema: schema(
+      {
+        content: { type: "string", description: "The exact user-provided content to save as a short-term memory." },
+      },
+      ["content"],
+    ),
+    annotations: { ...localWrite, idempotentHint: false },
+    timeoutClass: "normal",
+    executor: { kind: "swiftTool" },
+    intendedForAgents: true,
+    runtimePreconditions: [
+      "Requires the coordinator's typed desktop chat surface and authenticated backend access.",
+      "The Swift executor selects the new short-term-memory endpoint and legacy-memory fallback as supported by the installed app/backend.",
+    ],
+    adapters: piAndStdio("typedChatCoordinatorOnly"),
   },
   {
     name: "get_action_items",
@@ -1789,6 +1840,10 @@ export function isToolAvailableForContext(
   if (availability.condition === "onboardingOnly") return context.onboarding === true;
   if (availability.condition === "nonOnboarding") return context.onboarding !== true;
   if (availability.condition === "coordinatorOnly") return context.executionRole !== "leaf";
+  if (availability.condition === "typedChatCoordinatorOnly") {
+    return (context.surfaceKind === "main_chat" || context.surfaceKind === "floating_chat")
+      && context.executionRole === "coordinator";
+  }
   if (availability.condition === "screenContext") return context.screenContext === true;
   if (availability.condition === "screenContextOrOnboarding") return context.screenContext === true || context.onboarding === true;
   return true;
