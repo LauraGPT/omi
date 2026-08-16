@@ -111,8 +111,9 @@ def test_render_dev_emits_memory_maintenance_job_outputs():
     memory_env = _MODULE['_render_env_vars'](memory_job['env'])
     assert 'MEMORY_CANONICAL_MAINTENANCE_ENABLED=false' in memory_env
     assert 'MEMORY_CANONICAL_CONSOLIDATION_ENABLED=true' in memory_env
-    assert 'MEMORY_ENABLED_USERS=' in memory_env
-    assert 'MEMORY_MODE=off' in memory_env
+    assert 'MEMORY_ENABLED_USERS' not in memory_env
+    assert 'MEMORY_ENABLED=on' in memory_env
+    assert 'MEMORY_MODE=' not in memory_env
     assert 'MEMORY_CANONICAL_GRAPH_BACKFILL_ENABLED=false' in memory_env
     assert 'TYPESENSE_HOST_PORT=443' in memory_env
 
@@ -121,7 +122,8 @@ def test_render_dev_emits_memory_maintenance_job_outputs():
     assert '--cpu=2' in rendered_flags
     assert '--memory=2Gi' in rendered_flags
     assert (
-        '--remove-env-vars=MEMORY_CANONICAL_PROMOTION_CRON_ENABLED,'
+        '--remove-env-vars=MEMORY_ENABLED_USERS,'
+        'MEMORY_CANONICAL_PROMOTION_CRON_ENABLED,'
         'MEMORY_CANONICAL_PROMOTION_CRON_INTERVAL_HOURS,'
         'MEMORY_CANONICAL_PROMOTION_FAST_TRACK_ENABLED'
     ) in rendered_flags
@@ -146,6 +148,7 @@ def test_dev_runtime_manifest_contains_no_removed_first_user_or_capture_admissio
     notifications_job = cloud_run['jobs']['notifications-job']
     notifications_env = notifications_job['env']
     forbidden_notifications_vars = {
+        'MEMORY_ENABLED',
         'MEMORY_MODE',
         'MEMORY_ENABLED_USERS',
         'MEMORY_V3_GET_ENABLED',
@@ -189,11 +192,13 @@ def test_render_prod_keeps_memory_maintenance_job_promotion_off(capsys, monkeypa
     assert rc == 0
     out = capsys.readouterr().out
     job_env = _job_env_block(out, 'memory_maintenance_job')
-    assert 'MEMORY_MODE=off' in job_env
+    assert 'MEMORY_ENABLED=off' in job_env
+    assert 'MEMORY_MODE=' not in job_env
     assert 'MEMORY_CANONICAL_MAINTENANCE_ENABLED=false' in job_env
-    assert 'MEMORY_ENABLED_USERS=' in job_env
+    assert 'MEMORY_ENABLED_USERS' not in job_env
 
     assert 'DESKTOP_PREVIEW_PUBLISH_KEY=DESKTOP_PREVIEW_PUBLISH_KEY:latest' in _job_secret_lines(out, 'backend')
+    assert 'GOOGLE_MAPS_API_KEY=GOOGLE_MAPS_API_KEY:latest' in _job_secret_lines(out, 'backend_sync')
 
     notifications_env = _job_env_block(out, 'notifications_job')
     assert 'MEMORY_CANONICAL_MAINTENANCE_ENABLED' not in notifications_env
@@ -283,6 +288,7 @@ def test_memory_maintenance_job_workflow_passes_vpc_vars_and_checkout_sha():
     assert 'render_backend_runtime_env.py --env ${{ vars.ENV }} --job memory-maintenance-job' in text
     prod_memory_job = _MANIFEST['environments']['prod']['cloud_run']['jobs']['memory-maintenance-job']
     prod_job_flags = _MODULE['_render_flags'](prod_memory_job['flags'])
+    assert 'MEMORY_ENABLED_USERS' in prod_job_flags
     assert 'MEMORY_CANONICAL_PROMOTION_CRON_ENABLED' in prod_job_flags
     assert 'MEMORY_CANONICAL_PROMOTION_CRON_INTERVAL_HOURS' in prod_job_flags
     assert 'MEMORY_CANONICAL_PROMOTION_FAST_TRACK_ENABLED' in prod_job_flags
@@ -301,12 +307,20 @@ def test_auto_dev_memory_maintenance_workflow_selects_only_its_job():
     assert 'Duration: $((SECONDS - started_at))s' in text
 
 
-def test_backend_service_deploys_remove_retired_canonical_promotion_env_vars():
-    retired = (
-        'MEMORY_CANONICAL_PROMOTION_CRON_ENABLED,'
-        'MEMORY_CANONICAL_PROMOTION_CRON_INTERVAL_HOURS,'
-        'MEMORY_CANONICAL_PROMOTION_FAST_TRACK_ENABLED'
+def test_backend_service_deploys_remove_retired_canonical_memory_env_vars():
+    from scripts.runtime_env_memory_contract import RETIRED_CANONICAL_MEMORY_ENV
+
+    retired = ','.join(
+        name
+        for name in (
+            'MEMORY_ENABLED_USERS',
+            'MEMORY_CANONICAL_PROMOTION_CRON_ENABLED',
+            'MEMORY_CANONICAL_PROMOTION_CRON_INTERVAL_HOURS',
+            'MEMORY_CANONICAL_PROMOTION_FAST_TRACK_ENABLED',
+        )
+        if name in RETIRED_CANONICAL_MEMORY_ENV
     )
+    assert set(retired.split(',')) == set(RETIRED_CANONICAL_MEMORY_ENV)
     workflow_root = Path(__file__).resolve().parents[3] / '.github/workflows'
     deploy_action = Path(__file__).resolve().parents[3] / '.github/actions/deploy-backend-stack/action.yml'
     deploy_action_text = deploy_action.read_text(encoding='utf-8')
@@ -321,3 +335,13 @@ def test_backend_service_deploys_remove_retired_canonical_promotion_env_vars():
     action_text = action.read_text(encoding='utf-8')
     assert f'REMOVE_ENV_VARS: HOSTED_PUSHER_API_URL,{retired}' in action_text
     assert f'--remove-env-vars=HOSTED_PUSHER_API_URL,{retired}' in action_text
+
+    # The memory-maintenance-job is also a Cloud Run deploy that merges env
+    # vars across revisions. Its rendered --remove-env-vars must strip the
+    # same retired set so the stale binding does not survive the universal-
+    # memory change (see #11447, #11472).
+    manifest = _MANIFEST['environments']
+    for env in ('dev', 'prod'):
+        job = manifest[env]['cloud_run']['jobs']['memory-maintenance-job']
+        job_flags = _MODULE['_render_flags'](job['flags'])
+        assert f'--remove-env-vars={retired}' in job_flags, f'memory-maintenance-job for {env} must strip {retired}'

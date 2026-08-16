@@ -14,7 +14,13 @@ covers:
   - desktop/macos/Desktop/Sources/MainWindow/QueryShell/QuerySearchBar.swift
   - desktop/macos/Desktop/Sources/MainWindow/QueryShell/QueryResultsPanel.swift
   - desktop/macos/Desktop/Sources/MainWindow/QueryShell/QueryAnswerThread.swift
+  - desktop/macos/Desktop/Sources/MainWindow/Components/ChatMessagesView.swift
+  - desktop/macos/Desktop/Sources/MainWindow/Components/ChatPromptTimeline.swift
+  - desktop/macos/Desktop/Sources/MainWindow/Components/ChatPromptTimelineModel.swift
+  - desktop/macos/Desktop/Sources/MainWindow/Components/ChatScrollPositionDetector.swift
+  - desktop/macos/Desktop/Sources/MainWindow/Components/ChatTranscriptGeometry.swift
   - desktop/macos/Desktop/Sources/MainWindow/QueryShell/QueryChatCapability.swift
+  - desktop/macos/Desktop/Sources/Chat/ChatCitation.swift
 preconditions:
   - auth_ready
 
@@ -45,6 +51,12 @@ steps:
     expect:
       interactive_count: { min: 2 }
 
+  - id: S2d
+    name: Inline citations preview and open their exact source
+    do: "Ask a question grounded in at least one task, memory, or conversation and request citations. After the answer settles, verify its bracketed citation markers are individual focusable controls rather than plain text and no duplicate source rail appears below the answer. Hover a marker and verify an anchored preview shows the source type, title, and bounded summary without moving the transcript. Activate the marker with the pointer, then repeat with Tab and Return; verify the app opens the exact cited task, memory, or conversation rather than the generic destination. Return to Chat and verify the citation remains interactive after journal replay."
+    expect:
+      interactive_count: { min: 2 }
+
   - id: S3
     name: Verify Capture and Listening status
     do: "Verify the top-right area shows Capture status (may say 'Capture Blocked' if permission not granted) and Listening status (should show 'Listening On' state). Both should be clickable buttons."
@@ -64,3 +76,9 @@ steps:
     expect:
       text_visible:
         - Settings
+
+  - id: S6
+    name: Prompt rail and older messages
+    do: "In a long conversation, hover the trailing-edge hairline marks and verify a preview shows the prompt, the start of the reply, and a timestamp. Click a mark and verify the transcript jumps to that prompt. Scroll to the top, click Show older messages or Load earlier messages, and verify the same rows stay in view rather than jumping to the newly loaded oldest message."
+    expect:
+      interactive_count: { min: 2 }

@@ -22,7 +22,7 @@ struct TaskActionItem: Codable, Identifiable, Equatable {
   /// Classification category: personal, work, feature, bug, code, research, communication, finance, health, other
   let category: String?
   /// Soft-delete: true if this task has been deleted by AI dedup
-  let deleted: Bool?
+  var deleted: Bool?
   /// Who deleted: "user", "ai_dedup"
   let deletedBy: String?
   /// When the task was soft-deleted
@@ -79,11 +79,36 @@ struct TaskActionItem: Codable, Identifiable, Equatable {
     return true
   }
 
+  /// Accept receipts expose the canonical `task_id`; local rows key `id` to the
+  /// backend action-item id. Completing a just-accepted Suggested task must
+  /// match either.
+  func matchesTaskIdentifier(_ identifier: String) -> Bool {
+    id == identifier || taskId == identifier
+  }
+
   /// Server list/detail responses project soft retirement through canonical
   /// lifecycle status and may omit the legacy `deleted` field. Keep that
   /// projection here so every local cache and surface applies the same rule.
   var isRetired: Bool {
     deleted == true || taskStatus == "cancelled" || taskStatus == "superseded"
+  }
+
+  /// This row as the retired lane already knows it to be.
+  ///
+  /// `isRetired` re-derives retirement from fields the server may not send:
+  /// the doc comment above says list responses can omit legacy `deleted` and
+  /// project retirement through canonical lifecycle status, and that status
+  /// vocabulary is open — anything outside `cancelled`/`superseded` reads as
+  /// live. A row fetched from the deleted lane is retired because of *where it
+  /// came from*, so the lane states it rather than asking the projection to
+  /// guess. Without this, a retired row round-trips into the local cache with
+  /// `deleted = false` and comes back as a live task on any machine whose
+  /// cache was built from that lane.
+  func retired() -> TaskActionItem {
+    guard !isRetired else { return self }
+    var copy = self
+    copy.deleted = true
+    return copy
   }
 
   /// Custom Equatable: compares only display-relevant fields.
@@ -288,9 +313,8 @@ struct TaskActionItem: Codable, Identifiable, Equatable {
   /// "legacy" rows must stay in the normal due-date categories.
   static let aiCaptureSources: Set<String> = ["screenshot", "conversation", "ai_suggested"]
 
-  /// An AI-captured task the user has not accepted yet. Accepting rewrites
-  /// `source` to "manual", which moves it into the due-date categories and
-  /// syncs the acceptance across devices without a new backend field.
+  /// An AI-captured task. Used to keep leftover extractor rows out of
+  /// proactive-nudge grounding; they are ordinary due-date tasks on Tasks.
   var isPendingSuggestion: Bool {
     guard !completed, !isRetired else { return false }
     guard let source else { return false }
